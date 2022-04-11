@@ -1,163 +1,154 @@
-use std::{io::ErrorKind, net::UdpSocket, time::SystemTime};
+use std::{
+    io::{Bytes, ErrorKind},
+    net::UdpSocket,
+};
 
-struct Connection {
+const PACKET_BUFFER_SIZE: usize = 2096;
+
+struct ConnectPayload {}
+
+struct MessagePayload {
+    string: String,
+}
+
+pub enum Payload {
+    ConnectPayload,
+    MessagePayload,
+}
+
+struct Packet {
+    payload: Payload,
     address: String,
     port: u16,
-    //last_activity: SystemTime,
 }
 
-impl Connection {
-    pub fn new(address: &str, port: u16) -> Self {
-        Self {
-            address: address.to_string(),
-            port,
-            //last_activity: SystemTime::UNIX_EPOCH,
-        }
-    }
-}
-
-pub trait Receive {
-    fn receive(&mut self) -> Option<(&[u8], String, u16)>;
-}
-
-pub struct UdpServer {
-    socket: UdpSocket,
-    client_connections: Vec<Connection>,
-    receive_buffer: Vec<u8>,
-}
-
-impl UdpServer {
-    pub fn new() -> Self {
-        let socket = UdpSocket::bind("[::]:0").unwrap();
-        socket.set_nonblocking(true).unwrap();
-        Self {
-            socket,
-            client_connections: Vec::new(),
-            receive_buffer: vec![0; 2096],
-        }
-    }
-
-    pub fn start_listening_on_port(&mut self, port: u16) {
-        let socket_address = format!("{}:{}", "[::]", port);
-        let socket = UdpSocket::bind(socket_address).unwrap();
-        socket.set_nonblocking(true).unwrap();
-        self.socket = socket;
-    }
-
-    pub fn send(&self, message: &[u8]) {
-        for client_connection in &self.client_connections {
-            println!(
-                ">> message: {}, to: {}:{}",
-                std::str::from_utf8(message).unwrap(),
-                client_connection.address,
-                client_connection.port,
-            );
-            let dest_addr = format!("{}:{}", client_connection.address, client_connection.port);
-            self.socket.send_to(message, dest_addr).unwrap();
-        }
-    }
-}
-
-impl Receive for UdpServer {
-    fn receive(&mut self) -> Option<(&[u8], String, u16)> {
-        let mut result: Option<(&[u8], String, u16)> = None;
-        let recv_result = self.socket.recv_from(&mut self.receive_buffer);
-        match recv_result {
-            Ok((number_of_bytes_read, source_address)) => {
-                println!(
-                    "<< message: {}, from: {}:{}",
-                    std::str::from_utf8(&self.receive_buffer[..number_of_bytes_read]).unwrap(),
-                    source_address.ip().to_string(),
-                    source_address.port(),
-                );
-                if &self.receive_buffer[..number_of_bytes_read] == "hello".as_bytes() {
-                    self.client_connections.push(Connection::new(
-                        &source_address.ip().to_string(),
-                        source_address.port(),
-                    ));
-                }
-                result = Some((
-                    &self.receive_buffer[..number_of_bytes_read],
-                    source_address.ip().to_string(),
-                    source_address.port(),
-                ));
+impl Payload {
+    pub const fn serialize_as_bytes(&self) -> [u8; 2048] {
+        let mut bytes: [u8; 2048] = [0; 2048];
+        match self {
+            Payload::ConnectPayload => {
+                bytes[0] = 0;
             }
-            Err(error) if error.kind() != ErrorKind::WouldBlock => {
-                println!("receive failed: {:?}", error);
+            Payload::MessagePayload => {
+                bytes[0] = 1;
             }
-            _ => (),
         }
+        bytes
+    }
 
-        result
+    pub fn deserialize_from_bytes(&self, bytes: &[u8]) {
+        match bytes[0] {
+            0 => {
+                println!("received ConnectPayload");
+            }
+            1 => {
+                println!("received MessagePayload");
+            }
+            _ => {
+                println!("received unknown Payload");
+            }
+        }
     }
 }
 
-pub struct UdpClient {
-    socket: UdpSocket,
-    server_connection: Option<Connection>,
-    receive_buffer: Vec<u8>,
+pub(crate) fn send_payload(socket: &UdpSocket, payload: &Payload) {
+    socket.send(&payload.serialize_as_bytes());
 }
 
-impl UdpClient {
-    pub fn new() -> Self {
-        let socket = UdpSocket::bind("[::]:0").unwrap();
-        socket.set_nonblocking(true).unwrap();
-        Self {
-            socket: socket,
-            server_connection: None,
-            receive_buffer: vec![0; 2096],
+pub(crate) fn receive_payload(socket: &UdpSocket) -> Payload {
+    let mut received_payload = Payload::ConnectPayload;
+    let mut receive_buffer = [0; PACKET_BUFFER_SIZE];
+
+    let recv_result = socket.recv_from(&mut receive_buffer);
+    match recv_result {
+        Ok((number_of_bytes_read, source_address)) => {
+            received_payload.deserialize_from_bytes(&receive_buffer[..number_of_bytes_read])
+        }
+        Err(error) if error.kind() != ErrorKind::WouldBlock => {
+            println!("receive failed: {:?}", error);
+        }
+        _ => (),
+    }
+
+    Payload::ConnectPayload
+}
+
+struct ServerSocket {
+    socket: Option<UdpSocket>,
+    buffer: Vec<u8>,
+}
+
+impl ServerSocket {
+    fn new() -> Self {
+        ServerSocket {
+            socket: None,
+            buffer: vec![0; PACKET_BUFFER_SIZE],
         }
     }
 
-    pub fn connect_to_server(&mut self, address: &str, port: u16) {
-        let server_connection = Connection::new(&address.to_string(), port);
-        let server_addr = format!("{}:{}", server_connection.address, server_connection.port,);
-        self.socket
-            .send_to("hello".as_bytes(), server_addr)
-            .unwrap();
-        self.server_connection = Some(server_connection);
-    }
-
-    pub fn send(&self, message: &[u8]) {
-        println!(
-            ">> message: {}, to: {}:{}",
-            std::str::from_utf8(message).unwrap(),
-            self.server_connection.as_ref().unwrap().address,
-            self.server_connection.as_ref().unwrap().port,
-        );
-        let dest_addr = format!(
-            "{}:{}",
-            self.server_connection.as_ref().unwrap().address,
-            self.server_connection.as_ref().unwrap().port,
-        );
-        self.socket.send_to(message, dest_addr).unwrap();
+    fn start_listening_on_port(&mut self, port: u16) -> Result<(), &str> {
+        self.socket = Some(UdpSocket::bind(format!("[::]:{}", port)).unwrap());
+        Ok(())
     }
 }
 
-impl Receive for UdpClient {
-    fn receive(&mut self) -> Option<(&[u8], String, u16)> {
-        let mut result: Option<(&[u8], String, u16)> = None;
-        let recv_result = self.socket.recv_from(&mut self.receive_buffer);
-        match recv_result {
-            Ok((number_of_bytes_read, source_address)) => {
-                println!(
-                    "<< message: {}, from: {}:{}",
-                    std::str::from_utf8(&self.receive_buffer[..number_of_bytes_read]).unwrap(),
-                    source_address.ip().to_string(),
-                    source_address.port(),
-                );
-                result = Some((
-                    &self.receive_buffer[..number_of_bytes_read],
-                    source_address.ip().to_string(),
-                    source_address.port(),
-                ));
-            }
-            Err(error) if error.kind() != ErrorKind::WouldBlock => {
-                println!("receive failed: {:?}", error);
-            }
-            _ => (),
-        }
+struct ClientSocket {
+    socket: Option<UdpSocket>,
+    buffer: Vec<u8>,
+}
 
-        result
+impl ClientSocket {
+    fn new() -> Self {
+        ClientSocket {
+            socket: None,
+            buffer: vec![0; PACKET_BUFFER_SIZE],
+        }
+    }
+
+    fn send(&mut self, payload: &Payload) {
+        send_payload(&self.socket.as_mut().unwrap(), &payload);
+    }
+
+    fn connect_to_server(&mut self, address: &str, port: u16) -> Result<(), &str> {
+        let mut socket = UdpSocket::bind("[::]:0").unwrap();
+        match socket.connect(format!("{}:{}", address, port)) {
+            Ok(()) => {}
+            Err(err) => {
+                return Err("Could not connect!");
+            }
+        }
+        let payload = Payload::ConnectPayload;
+        send_payload(&socket, &payload);
+        self.socket = Some(socket);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+        let result = 2 + 2;
+
+        let mut server_socket = crate::ServerSocket::new();
+        let mut client_socket = crate::ClientSocket::new();
+
+        server_socket.start_listening_on_port(1337).unwrap();
+
+        client_socket.connect_to_server("127.0.0.1", 1337).unwrap();
+
+        let bla = "hello".as_bytes();
+
+        crate::receive_payload(&server_socket.socket.as_mut().unwrap());
+
+        /*let packet_received_by_server_socket = server_socket.receive();
+
+        let packet_responded_to_client = hermes::Packet::new("hello".as_bytes());
+
+        client_socket.receive();
+
+        server_socket.send();*/
+
+        assert_eq!(result, 4);
     }
 }
